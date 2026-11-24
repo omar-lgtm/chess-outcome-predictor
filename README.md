@@ -1,5 +1,7 @@
 # Chess Outcome Predictor
 
+**Live demo:** https://chess-outcome-predictor.streamlit.app/
+
 Predicts the result of an online chess game (white win, black win or draw) from the two players' ratings.
 
 ## Problem
