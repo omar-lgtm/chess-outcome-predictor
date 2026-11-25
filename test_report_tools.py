@@ -13,8 +13,9 @@ import pandas as pd
 
 from pgn_tools import parse_pgn
 from report_tools import (
-    add_expected, add_groupings, build_report, clean_games, group_report,
-    rating_by_month, wilson_interval,
+    add_expected, add_groupings, brier_score, build_report, clean_games,
+    compare_predictors, group_report, rating_by_month,
+    time_group_adjustments, wilson_interval,
 )
 
 SAMPLE_FILE = "data/chipsa69-white.pgn"
@@ -203,6 +204,73 @@ try:
 except ValueError:
     pass
 print("Test 11 passed: an empty file raises ValueError")
+
+# Test 12: Brier score of predicting 0.5 for one win and one loss.
+assert brier_score([0.5, 0.5], [1, 0]) == 0.25
+print("Test 12 passed: brier_score([0.5, 0.5], [1, 0]) = 0.25")
+
+# Test 13: shrinking the time group adjustments.
+# Both groups score 0.2 above expected; one has 10 games, the other 1000.
+games = pd.DataFrame({
+    "time_group": ["small"] * 10 + ["big"] * 1000,
+    "score": 0.7,
+    "expected": 0.5,
+})
+adjustments = time_group_adjustments(games, k=50)
+assert abs(adjustments["small"] - 0.2 * 10 / 60) < 1e-9
+assert abs(adjustments["big"] - 0.2 * 1000 / 1050) < 1e-9
+assert adjustments["big"] > 0.19                    # nearly the full 0.2
+assert adjustments["small"] < adjustments["big"]    # small group pulled closer to 0
+assert set(adjustments) == {"small", "big"}
+print(f"Test 13 passed: adjustments small = {adjustments['small']:.4f}, "
+      f"big = {adjustments['big']:.4f}")
+
+
+# Tests 14 and 15: compare_predictors on made-up games with a known curve.
+def make_games(n=600, seed=11):
+    """n made-up games, one per day in date order, with score following a
+    known logistic curve of rating_diff (wins, draws and losses)."""
+    rng = np.random.default_rng(seed)
+    rating_diff = rng.integers(-300, 301, size=n)
+    p = 1 / (1 + np.exp(-(0.05 + 1.0 * rating_diff / 100)))
+    u = rng.random(n)
+    # Win if u < p - 0.03, draw in a thin band around it, loss otherwise.
+    score = np.where(u < p - 0.03, 1.0, np.where(u < p + 0.03, 0.5, 0.0))
+    return pd.DataFrame({
+        "date": pd.date_range("2022-01-01", periods=n, freq="D"),
+        "colour": rng.choice(["white", "black"], size=n),
+        "rating_diff": rating_diff,
+        "score": score,
+        "base_seconds": rng.choice([60, 180, 600], size=n),
+        "opening": "Made-Up-Opening",
+    })
+
+
+games = make_games()
+results, info = compare_predictors(games)   # time_group is added inside
+brier = dict(zip(results["predictor"], results["brier"]))
+assert info["train_games"] == int(0.7 * 600) == 420
+assert info["test_games"] == 180
+assert info["train_games"] + info["test_games"] == len(games)
+assert info["train_end"] <= info["test_start"]
+assert brier["Personal curve"] < brier["Constant"]
+assert "General model" not in brier
+assert len(results) == 2 + 3                       # constant, curve, 3 k values
+assert list(results["brier"]) == sorted(results["brier"])
+# The fitted parameters must be exactly what fitting the first 420 games gives,
+# which shows the test games were not used for fitting.
+_, train_only_params = add_expected(games.iloc[:420])
+assert info["params"] == train_only_params
+print(f"Test 14 passed: personal curve Brier {brier['Personal curve']:.4f} "
+      f"beats constant {brier['Constant']:.4f}, fitted on train games only")
+
+# Test 15: a made-up "general model" that always predicts 0.5.
+results, info = compare_predictors(games, general_expected=lambda d: np.full(len(d), 0.5))
+assert "General model" in set(results["predictor"])
+assert len(results) == 3 + 3
+general = results.set_index("predictor").loc["General model"]
+assert general["mean_predicted"] == 0.5
+print("Test 15 passed: a General model row appears when a function is given")
 print()
 
 

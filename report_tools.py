@@ -48,12 +48,14 @@ def clean_games(df):
     return clean_df, info
 
 
-def fit_logistic(X, y, max_iter=50, ridge=1e-6):
+def fit_logistic(X, y, max_iter=50, ridge=1e-6, sample_weight=None):
     """
     Fit a logistic regression with Newton-Raphson, using numpy only.
 
     X: 2D array, one row per game, one column per term (first column all 1s).
     y: targets between 0 and 1 (here 1, 0.5 or 0, so draws count as half).
+    sample_weight: optional weight per game (for example, recent games
+        counting more). None means every game counts the same.
 
     Each step moves the coefficients using the gradient (how wrong we are)
     and the Hessian (how curved the error is). The tiny ridge added to the
@@ -62,14 +64,69 @@ def fit_logistic(X, y, max_iter=50, ridge=1e-6):
     beta = np.zeros(X.shape[1])
     for _ in range(max_iter):
         p = 1 / (1 + np.exp(-(X @ beta)))         # current predictions
-        gradient = X.T @ (y - p)
-        weights = p * (1 - p)
+        if sample_weight is None:
+            gradient = X.T @ (y - p)
+            weights = p * (1 - p)
+        else:
+            # Each game's pull on the fit is scaled by its weight.
+            gradient = X.T @ (sample_weight * (y - p))
+            weights = sample_weight * p * (1 - p)
         hessian = X.T @ (X * weights[:, None]) + ridge * np.eye(X.shape[1])
         step = np.linalg.solve(hessian, gradient)
         beta = beta + step
         if np.max(np.abs(step)) < 1e-8:            # stop once it has settled
             break
     return beta
+
+
+def design_matrix(df, use_colour):
+    """
+    Build the X matrix for the expected-score curve: a column of 1s (for a),
+    the rating gap in units of 100 points (for b), and is_white (for c) if
+    the colour term is used.
+    """
+    columns = [np.ones(len(df)), df["rating_diff"].to_numpy() / 100]
+    if use_colour:
+        columns.append((df["colour"] == "white").astype(float).to_numpy())
+    return np.column_stack(columns)
+
+
+def fit_expected_params(df, sample_weight=None):
+    """
+    Fit the expected-score curve to the games in df.
+
+    The colour term c is only used if both colours have at least 30 games
+    (counted as games, whatever their weights).
+    sample_weight: optional weight per game, in the same order as df.
+    Returns {"a": ..., "b": ..., "c": ... or None}.
+    """
+    is_white = (df["colour"] == "white").to_numpy()
+    use_colour = (
+        is_white.sum() >= MIN_GAMES_PER_COLOUR
+        and (~is_white).sum() >= MIN_GAMES_PER_COLOUR
+    )
+    X = design_matrix(df, use_colour)
+    y = df["score"].to_numpy(dtype=float)
+    if sample_weight is not None:
+        sample_weight = np.asarray(sample_weight, dtype=float)
+    beta = fit_logistic(X, y, sample_weight=sample_weight)
+    return {
+        "a": float(beta[0]),
+        "b": float(beta[1]),
+        "c": float(beta[2]) if use_colour else None,
+    }
+
+
+def predict_expected(df, params):
+    """
+    Expected score for each row of df, using already fitted a, b and c:
+        1 / (1 + exp(-(a + b * rating_diff/100 + c * is_white)))
+    If c is None the colour term is left out. Returns a numpy array.
+    """
+    use_colour = params["c"] is not None
+    beta = [params["a"], params["b"]] + ([params["c"]] if use_colour else [])
+    X = design_matrix(df, use_colour)
+    return 1 / (1 + np.exp(-(X @ np.array(beta))))
 
 
 def add_expected(df):
@@ -82,29 +139,109 @@ def add_expected(df):
     Returns (df_with_expected, {"a": ..., "b": ..., "c": ... or None}).
     """
     df = df.copy()
-    is_white = (df["colour"] == "white").astype(float).to_numpy()
-    use_colour = (
-        is_white.sum() >= MIN_GAMES_PER_COLOUR
-        and (1 - is_white).sum() >= MIN_GAMES_PER_COLOUR
-    )
-
-    # Build the X matrix: a column of 1s (for a), the rating gap in units
-    # of 100 points (for b), and is_white (for c) if it is used.
-    columns = [np.ones(len(df)), df["rating_diff"].to_numpy() / 100]
-    if use_colour:
-        columns.append(is_white)
-    X = np.column_stack(columns)
-    y = df["score"].to_numpy(dtype=float)
-
-    beta = fit_logistic(X, y)
-    df["expected"] = 1 / (1 + np.exp(-(X @ beta)))
-
-    params = {
-        "a": float(beta[0]),
-        "b": float(beta[1]),
-        "c": float(beta[2]) if use_colour else None,
-    }
+    params = fit_expected_params(df)
+    df["expected"] = predict_expected(df, params)
     return df, params
+
+
+def brier_score(predicted, actual):
+    """
+    Mean squared difference between predicted and actual scores.
+    Lower is better: 0 is perfect, and always predicting 0.5 for games
+    that are all wins or losses gives 0.25.
+    """
+    predicted = np.asarray(predicted, dtype=float)
+    actual = np.asarray(actual, dtype=float)
+    return float(np.mean((predicted - actual) ** 2))
+
+
+def time_group_adjustments(train_df_with_expected, k=50):
+    """
+    How much each time_group scores above (+) or below (-) the curve,
+    shrunk towards 0 for groups with few games.
+
+    For a group with n games and an average difference d (score minus
+    expected), the adjustment is d * n / (n + k). A group of 10 games keeps
+    only a small part of its difference; a group of 1,000 keeps almost all.
+    Bigger k means more shrinking.
+    """
+    df = train_df_with_expected
+    adjustments = {}
+    for group, games in df.groupby("time_group"):
+        n = len(games)
+        d = (games["score"] - games["expected"]).mean()
+        adjustments[group] = float(d * n / (n + k))
+    return adjustments
+
+
+def compare_predictors(df, train_fraction=0.7, general_expected=None, ks=(25, 50, 100)):
+    """
+    Compare ways of predicting a game's score on games they have not seen.
+
+    The games are sorted by date. The earliest train_fraction of them are
+    used for fitting ("train"), and every predictor is then scored with the
+    Brier score on the later games ("test"). Nothing is fitted on test games.
+
+    Predictors:
+    - Constant: the average train score for every game.
+    - General model: general_expected(test_df), if a function is given.
+    - Personal curve: the expected-score curve fitted on the train games.
+    - Personal curve + time adjustment (k=...): the personal curve plus the
+      shrunk time_group adjustment from the train games, kept between
+      0.01 and 0.99.
+
+    Returns (results_df sorted by Brier score, info dict).
+    """
+    data = df.copy()
+    if "time_group" not in data.columns:
+        data = add_groupings(data)
+    data = data.sort_values("date", kind="stable").reset_index(drop=True)
+
+    n_train = int(train_fraction * len(data))
+    train = data.iloc[:n_train].copy()
+    test = data.iloc[n_train:].copy()
+    if len(train) == 0 or len(test) == 0:
+        raise ValueError("Not enough games to split into train and test sets.")
+
+    # Fit on the train games only, then predict for both sets.
+    params = fit_expected_params(train)
+    train["expected"] = predict_expected(train, params)
+    personal = predict_expected(test, params)
+
+    predictions = {"Constant": np.full(len(test), train["score"].mean())}
+    if general_expected is not None:
+        predictions["General model"] = np.asarray(general_expected(test), dtype=float)
+    predictions["Personal curve"] = personal
+    for k in ks:
+        adjustments = time_group_adjustments(train, k)
+        # Time groups not seen in the train games get no adjustment.
+        shift = test["time_group"].map(adjustments).fillna(0).to_numpy()
+        predictions[f"Personal curve + time adjustment (k={k})"] = np.clip(
+            personal + shift, 0.01, 0.99
+        )
+
+    actual = test["score"].to_numpy(dtype=float)
+    results = pd.DataFrame([
+        {
+            "predictor": name,
+            "brier": brier_score(predicted, actual),
+            "mean_predicted": float(np.mean(predicted)),
+            "mean_actual": float(np.mean(actual)),
+        }
+        for name, predicted in predictions.items()
+    ])
+    results = results.sort_values("brier", kind="stable").reset_index(drop=True)
+
+    info = {
+        "train_games": len(train),
+        "test_games": len(test),
+        "train_start": str(train["date"].iloc[0].date()),
+        "train_end": str(train["date"].iloc[-1].date()),
+        "test_start": str(test["date"].iloc[0].date()),
+        "test_end": str(test["date"].iloc[-1].date()),
+        "params": params,
+    }
+    return results, info
 
 
 def wilson_interval(points, n, z=1.96):
