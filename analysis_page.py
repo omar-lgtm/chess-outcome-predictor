@@ -9,9 +9,32 @@ their rating gaps alone would predict, by opening, time control and year.
 import pandas as pd
 import streamlit as st
 
-from report_tools import build_report
+from pgn_tools import parse_pgn
+from report_tools import add_groupings, build_report, clean_games
 
-MAX_FILE_MB = 30
+MAX_FILE_MB = 30   # keep in step with maxUploadSize in .streamlit/config.toml
+
+# One set of result colours for the whole app. The words are always shown
+# too, so nothing depends on colour alone.
+PRIMARY_COLOUR = "#2F6F5E"
+RESULT_COLOURS = {"win": "#2F6F5E", "draw": "#8A8F98", "loss": "#B5533C"}
+# Light tints of the same colours, used behind dark text in the tables.
+RESULT_TINTS = {"win": "#D5E2DF", "draw": "#E8E9EA", "loss": "#F0DDD8"}
+
+# Which tint goes with each verdict as shown to the user.
+VERDICT_TINTS = {
+    "Possibly above expectation": RESULT_TINTS["win"],
+    "In line": RESULT_TINTS["draw"],
+    "Possibly below expectation": RESULT_TINTS["loss"],
+}
+
+# Where the clean games are kept for this browser session, so the
+# "Predict a game" tab can use them. The value is a dict with "games"
+# (the clean games table, no names), "info" and "fingerprint".
+GAMES_KEY = "my_games"
+# The upload whose games the user cleared, so they are not stored again
+# until a new file is uploaded.
+CLEARED_KEY = "my_games_cleared_upload"
 
 # How each verdict from group_report is shown to the user. "Possibly" is
 # there because some flags will be luck when there are many rows.
@@ -32,6 +55,57 @@ def cached_report(text, player):
     return build_report(text, player)
 
 
+# The clean games table, made with the same steps as the report.
+# parse_pgn never puts opponent names in the table, and the username is
+# left out here, so the stored table holds no names at all.
+@st.cache_data(show_spinner=False)
+def cached_clean_games(text, player):
+    df, parse_info = parse_pgn(text, player)
+    df, clean_info = clean_games(df)
+    df = add_groupings(df)
+    info = {"games_used": parse_info["games_used"], "clean_games": clean_info["kept"]}
+    return df, info
+
+
+def games_fingerprint(df):
+    """A short label for a games table: count plus first and last date."""
+    return (len(df), str(df["date"].min().date()), str(df["date"].max().date()))
+
+
+def store_games(text, player, upload_id):
+    """
+    Keep the clean games in session state for the "Predict a game" tab,
+    unless the user cleared this upload. Reruns the page once when the
+    stored games change, because the first tab is drawn before this one.
+    """
+    if st.session_state.get(CLEARED_KEY) == upload_id:
+        return
+    games, info = cached_clean_games(text, player)
+    fingerprint = games_fingerprint(games)
+    current = st.session_state.get(GAMES_KEY)
+    if current is None or current["fingerprint"] != fingerprint:
+        st.session_state[GAMES_KEY] = {
+            "games": games, "info": info, "fingerprint": fingerprint,
+        }
+        st.rerun()
+
+
+def session_games_controls(upload_id):
+    """A small note and a button to remove the games from this session."""
+    st.subheader("Your games in this session")
+    if GAMES_KEY not in st.session_state:
+        st.caption("Your games have been cleared from this session.")
+        return
+    st.caption(
+        "Your cleaned games are kept in memory for this session so the "
+        "\"Predict a game\" tab can show your personal odds."
+    )
+    if st.button("Clear my games from this session"):
+        st.session_state.pop(GAMES_KEY, None)
+        st.session_state[CLEARED_KEY] = upload_id
+        st.rerun()
+
+
 def display_table(table):
     """Turn a group_report table into a tidy table for display."""
     return pd.DataFrame({
@@ -49,6 +123,17 @@ def display_table(table):
     })
 
 
+def verdict_style(verdict):
+    """CSS for one Verdict cell: a soft tint, dark text. No tint for "too few"."""
+    tint = VERDICT_TINTS.get(verdict)
+    return f"background-color: {tint}; color: #1F2933" if tint else ""
+
+
+def styled_table(table):
+    """The display table with the Verdict column tinted by result colour."""
+    return display_table(table).style.map(verdict_style, subset=["Verdict"])
+
+
 def render():
     """Draw the whole "Analyse your games" tab."""
     st.header("Analyse your games")
@@ -57,8 +142,11 @@ def render():
         "where you score better or worse than your ratings predict."
     )
     st.info(
-        "Privacy: your file is used only to build this report and is not "
-        "saved by this app. It is, however, processed on the app's server."
+        "Privacy: your file is used only to build this report and your "
+        "personal odds, and is not saved by this app. Your cleaned games, "
+        "without any names, are kept in memory only for this browser session, "
+        "and you can clear them below the report. The file is, however, "
+        "processed on the app's server."
     )
 
     uploaded = st.file_uploader("PGN file", type=["pgn"])
@@ -88,7 +176,12 @@ def render():
         st.warning(str(error))
         return
 
+    # Each new upload gets its own id; used to remember a "clear" click.
+    upload_id = getattr(uploaded, "file_id", None) or (uploaded.name, uploaded.size)
+    store_games(text, player, upload_id)
+
     show_report(report)
+    session_games_controls(upload_id)
 
 
 def show_report(report):
@@ -113,17 +206,17 @@ def show_report(report):
 
     # --- Rating over time --------------------------------------------------
     st.subheader("Your rating by month")
-    st.line_chart(report["rating_months"], x="month", y="my_rating")
+    st.line_chart(report["rating_months"], x="month", y="my_rating", color=PRIMARY_COLOUR)
 
     # --- Tables ------------------------------------------------------------
     st.subheader("By opening")
-    st.dataframe(display_table(report["opening_table"]), hide_index=True)
+    st.dataframe(styled_table(report["opening_table"]), hide_index=True)
 
     st.subheader("By time control")
-    st.dataframe(display_table(report["time_table"]), hide_index=True)
+    st.dataframe(styled_table(report["time_table"]), hide_index=True)
 
     st.subheader("By year")
-    st.dataframe(display_table(report["year_table"]), hide_index=True)
+    st.dataframe(styled_table(report["year_table"]), hide_index=True)
 
     # --- Explanation -------------------------------------------------------
     st.subheader("How to read this")

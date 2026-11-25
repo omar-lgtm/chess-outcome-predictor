@@ -1,0 +1,11 @@
+[theme]
+base = "light"
+primaryColor = "#2F6F5E"
+backgroundColor = "#FAF8F3"
+secondaryBackgroundColor = "#EFEBE0"
+textColor = "#1F2933"
+font = "sans serif"
+
+[server]
+# Matches MAX_FILE_MB in analysis_page.py.
+maxUploadSize = 30
