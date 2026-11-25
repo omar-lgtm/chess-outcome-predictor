@@ -13,7 +13,7 @@ import pandas as pd
 
 from pgn_tools import parse_pgn
 from report_tools import (
-    add_expected, add_groupings, clean_games, group_report,
+    add_expected, add_groupings, build_report, clean_games, group_report,
     rating_by_month, wilson_interval,
 )
 
@@ -114,6 +114,95 @@ assert list(games["time_group"]) == [
     "1 min or less", "2 min", "3-5 min", "more than 5 min",
 ]
 print("Test 7 passed: add_groupings gives the expected family, year and time group")
+
+# Test 8: opening_family handles both naming styles.
+games = pd.DataFrame({
+    "opening": [
+        "Imaginary Defense: Long Variation, Sub Line",   # Lichess style
+        "Imaginary Defense",                             # Lichess, no colon
+        "Pretend-Gambit-Accepted-Main-Line",             # Chess.com style
+    ],
+    "date": pd.to_datetime(["2024-01-01"] * 3),
+    "base_seconds": [180] * 3,
+})
+games = add_groupings(games)
+assert list(games["opening_family"]) == [
+    "Imaginary Defense", "Imaginary Defense", "Pretend-Gambit",
+]
+print("Test 8 passed: opening_family works for colon and hyphen names")
+
+
+# Tests 9 to 11: build_report on a made-up PGN file.
+def make_pgn(n_games, seed=7):
+    """
+    Build PGN text with n_games invented games for the player "Alice".
+    30 invented opponents (Opp01 to Opp30) take turns, so each appears
+    fewer than 20 times in 300 games. Ratings, dates, colours, results and
+    time controls all vary.
+    """
+    rng = np.random.default_rng(seed)
+    openings = ["Imaginary Defense: Main Line", "Pretend Opening: Side Line",
+                "Made-Up-Gambit-Declined"]
+    time_controls = ["60", "180+2", "600"]
+    parts = []
+    for i in range(n_games):
+        opponent = f"Opp{i % 30 + 1:02d}"
+        alice_elo = 1500 + i + int(rng.integers(-20, 21))
+        opp_elo = alice_elo + int(rng.integers(-200, 201))
+        if i % 2 == 0:
+            white, black, white_elo, black_elo = "Alice", opponent, alice_elo, opp_elo
+        else:
+            white, black, white_elo, black_elo = opponent, "Alice", opp_elo, alice_elo
+        result = rng.choice(["1-0", "0-1", "1/2-1/2"], p=[0.47, 0.47, 0.06])
+        year = 2022 + i // 100                 # 2022, 2023 and 2024
+        month = i % 12 + 1
+        day = i % 28 + 1
+        parts.append(
+            f'[Event "Made-up game"]\n'
+            f'[White "{white}"]\n[Black "{black}"]\n'
+            f'[Result "{result}"]\n'
+            f'[WhiteElo "{white_elo}"]\n[BlackElo "{black_elo}"]\n'
+            f'[UTCDate "{year}.{month:02d}.{day:02d}"]\n'
+            f'[TimeControl "{time_controls[i % 3]}"]\n'
+            f'[ECO "A00"]\n[Opening "{openings[i % 3]}"]\n'
+            f'\n1. e4 e5 {result}\n\n'
+        )
+    return "".join(parts)
+
+
+report = build_report(make_pgn(300))
+assert set(report) == {
+    "parse_info", "clean_info", "params", "overall", "opening_table",
+    "time_table", "year_table", "rating_months",
+}
+# The player's name is returned as written in the file.
+assert report["parse_info"]["player"] == "Alice"
+assert report["clean_info"] == {"total": 300, "kept": 300, "set_aside": 0}
+assert report["params"]["c"] is not None          # both colours, 150 each
+assert list(report["year_table"]["group"]) == [2022, 2023, 2024]
+# No opponent name may appear anywhere in the result.
+everything = " ".join(
+    value.to_string() if isinstance(value, pd.DataFrame) else str(value)
+    for value in report.values()
+)
+assert "Opp" not in everything
+print("Test 9 passed: build_report returns all parts and no opponent names")
+
+# Test 10: a 5-game file is too small for a report.
+try:
+    build_report(make_pgn(5))
+    raise AssertionError("expected a ValueError for a 5-game file")
+except ValueError:
+    pass
+print("Test 10 passed: a 5-game file raises ValueError")
+
+# Test 11: an empty string has no games.
+try:
+    build_report("")
+    raise AssertionError("expected a ValueError for an empty file")
+except ValueError:
+    pass
+print("Test 11 passed: an empty file raises ValueError")
 print()
 
 

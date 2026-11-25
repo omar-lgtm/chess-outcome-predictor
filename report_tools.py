@@ -13,6 +13,8 @@ A typical pipeline is:
 The idea: first predict each game's expected score from the rating gap
 (and colour), then check whether some groups of games (an opening, a time
 control, a year) score clearly above or below what the ratings predicted.
+
+build_report() runs all of these steps in one call.
 """
 
 import math
@@ -20,8 +22,13 @@ import math
 import numpy as np
 import pandas as pd
 
+from pgn_tools import parse_pgn
+
 # Fewest games per colour needed before the colour term is added to the model.
 MIN_GAMES_PER_COLOUR = 30
+
+# Fewest clean games needed before build_report will make a report.
+MIN_CLEAN_GAMES = 100
 
 
 def clean_games(df):
@@ -162,9 +169,18 @@ def group_report(df, by, min_games=40):
 
 
 def opening_family(name):
-    """First two hyphen-separated words of an opening name."""
+    """
+    Short family name for an opening.
+
+    Lichess style, with a colon: the text before the first colon.
+        "Sicilian Defense: Najdorf Variation" -> "Sicilian Defense"
+    Chess.com style, with hyphens: the first two hyphen-separated words.
+        "Scandinavian-Defense-Mieses-Kotrc-Variation" -> "Scandinavian-Defense"
+    """
     if not isinstance(name, str):
         return name  # keep missing values as they are
+    if ":" in name:
+        return name.split(":")[0].strip()
     return "-".join(name.split("-")[:2])
 
 
@@ -200,3 +216,54 @@ def rating_by_month(df):
         .rename(columns={"date": "month"})
     )
     return result.sort_values("month").reset_index(drop=True)
+
+
+def build_report(text, player=None, min_games=40):
+    """
+    Run the whole pipeline on PGN text and return everything the report needs.
+
+    Raises ValueError with a short message if there is not enough to report on.
+    The result holds only the player's own name (in parse_info), never
+    opponent names: parse_pgn already keeps those out of its output.
+    """
+    df, parse_info = parse_pgn(text, player)
+
+    if parse_info["games_in_file"] == 0:
+        raise ValueError("No games were found. Please check that this is a PGN file.")
+    if parse_info["games_used"] == 0:
+        raise ValueError(
+            "None of the games could be used. Check the username, and that "
+            "the games have ratings and a normal result."
+        )
+
+    df, clean_info = clean_games(df)
+    if clean_info["kept"] < MIN_CLEAN_GAMES:
+        raise ValueError(
+            f"Only {clean_info['kept']} usable games were left after cleaning. "
+            f"At least {MIN_CLEAN_GAMES} are needed for a meaningful report."
+        )
+
+    df, params = add_expected(df)
+    df = add_groupings(df)
+
+    overall = {
+        "games": len(df),
+        "score": float(df["score"].mean()),
+        "expected": float(df["expected"].mean()),
+    }
+    year_table = (
+        group_report(df, "year", min_games)
+        .sort_values("group")
+        .reset_index(drop=True)
+    )
+
+    return {
+        "parse_info": parse_info,
+        "clean_info": clean_info,
+        "params": params,
+        "overall": overall,
+        "opening_table": group_report(df, "opening_family", min_games),
+        "time_table": group_report(df, "time_group", min_games),
+        "year_table": year_table,
+        "rating_months": rating_by_month(df),
+    }
