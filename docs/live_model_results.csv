@@ -1,0 +1,31 @@
+ply_bucket,model,accuracy,log_loss,brier,n_rows
+5 to 20,GB with ratings,0.6172,0.7655,0.471,10981
+25 to 40,GB with ratings,0.6647,0.7185,0.4324,9319
+45 to 60,GB with ratings,0.7192,0.6781,0.3926,6340
+65 to 90,GB with ratings,0.7246,0.6672,0.3771,4756
+95 to 120,GB with ratings,0.7448,0.608,0.3425,1826
+overall,GB with ratings,0.6724,0.7129,0.4247,33222
+5 to 20,GB position only,0.5412,0.8223,0.5207,10981
+25 to 40,GB position only,0.6377,0.75,0.4579,9319
+45 to 60,GB position only,0.7025,0.6908,0.4027,6340
+65 to 90,GB position only,0.7246,0.6681,0.3802,4756
+95 to 120,GB position only,0.7607,0.5858,0.3292,1826
+overall,GB position only,0.6374,0.7418,0.4499,33222
+5 to 20,Pooled logistic regression,0.6211,0.7648,0.471,10981
+25 to 40,Pooled logistic regression,0.667,0.7212,0.4358,9319
+45 to 60,Pooled logistic regression,0.7057,0.6953,0.4045,6340
+65 to 90,Pooled logistic regression,0.713,0.6961,0.395,4756
+95 to 120,Pooled logistic regression,0.7317,0.6622,0.3712,1826
+overall,Pooled logistic regression,0.6693,0.7238,0.4321,33222
+5 to 20,Ratings-only logistic regression,0.6152,0.7737,0.4781,10981
+25 to 40,Ratings-only logistic regression,0.6023,0.7854,0.4858,9319
+45 to 60,Ratings-only logistic regression,0.5855,0.8259,0.5054,6340
+65 to 90,Ratings-only logistic regression,0.5542,0.8937,0.539,4756
+95 to 120,Ratings-only logistic regression,0.4929,0.9673,0.5824,1826
+overall,Ratings-only logistic regression,0.5905,0.8148,0.4999,33222
+5 to 20,Material rule,0.5201,,,10981
+25 to 40,Material rule,0.6017,,,9319
+45 to 60,Material rule,0.677,,,6340
+65 to 90,Material rule,0.7094,,,4756
+95 to 120,Material rule,0.7338,,,1826
+overall,Material rule,0.6118,,,33222
