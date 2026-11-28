@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 import analysis_page
+import live_game_page
 from analysis_page import RESULT_COLOURS
 from calculator_tools import (
     MIN_GAMES, MIN_SIMILAR, bootstrap_param_sets, default_rating, general_odds,
@@ -205,7 +206,7 @@ def render_personal_odds():
         )
 
 # ---------------------------------------------------------------------------
-# Page header (shown once, above both tabs)
+# Page header (shown once, above the tabs)
 # ---------------------------------------------------------------------------
 st.title("Chess Outcome Predictor")
 st.write(
@@ -213,7 +214,7 @@ st.write(
     "from the two players' ratings."
 )
 
-tab1, tab2 = st.tabs(["Predict a game", "Analyse your games"])
+tab1, tab2, tab3 = st.tabs(["Predict a game", "Analyse your games", "Live game"])
 
 with tab1:
     # ---------------------------------------------------------------------------
@@ -296,3 +297,6 @@ with tab1:
 
 with tab2:
     analysis_page.render()
+
+with tab3:
+    live_game_page.render()

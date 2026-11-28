@@ -8,6 +8,7 @@ import json
 import tempfile
 from pathlib import Path
 
+import chess
 import joblib
 import numpy as np
 import pandas as pd
@@ -18,7 +19,7 @@ from sklearn.model_selection import GroupKFold
 from inplay_tools import feature_groups, split_rows
 from live_model_tools import (
     META_FILE, POSITION_ONLY_FILE, WITH_RATINGS_FILE, build_live_rows, load_bundle,
-    ordered_features, predict_curve,
+    ordered_features, predict_curve, terminal_result,
 )
 
 GROUPS = feature_groups()
@@ -140,3 +141,47 @@ try:
 except ValueError:
     pass
 print("Test 6 passed: the feature-order guard refuses a wrong order or a missing column")
+
+# Test 7: beyond_training is True only for plies after the stored max ply,
+# and missing time-control values reach the model as NaN.
+assert not curve["beyond_training"].any()                    # 24 plies, max_ply 120
+short_meta = {**bundle, "meta": {**meta, "max_ply": 10}}
+flagged = predict_curve(GAME, 1500, 1450, 10, 0, 1, bundle=short_meta)
+assert flagged["beyond_training"].dtype == bool
+assert list(flagged["ply"][flagged["beyond_training"]]) == list(range(11, 25))
+assert np.allclose(flagged[["p_black", "p_draw", "p_white"]], curve[["p_black", "p_draw", "p_white"]])
+missing_time = predict_curve(GAME, 1500, 1450, bundle=bundle)   # no time control or rated
+assert np.allclose(missing_time[["p_black", "p_draw", "p_white"]].sum(axis=1), 1)
+print("Test 7 passed: beyond_training flags only plies after max_ply; missing values are allowed")
+
+# Test 8: finished positions get the real result; before_training marks plies 0 to 4.
+OPERA = ("1.e4 e5 2.Nf3 d6 3.d4 Bg4 4.dxe5 Bxf3 5.Qxf3 dxe5 6.Bc4 Nf6 7.Qb3 Qe7 "
+         "8.Nc3 c6 9.Bg5 b5 10.Nxb5 cxb5 11.Bxb5+ Nbd7 12.O-O-O Rd8 13.Rxd7 Rxd7 "
+         "14.Rd1 Qe6 15.Bxd7+ Nxd7 16.Qb8+ Nxb8 17.Rd8#")
+# Sam Loyd's ten-move stalemate (legal; Black to move has no moves and is not in check).
+LOYD = ("1.e3 a5 2.Qh5 Ra6 3.Qxa5 h5 4.Qxc7 Rah6 5.h4 f6 6.Qxd7+ Kf7 7.Qxb7 Qd3 "
+        "8.Qxb8 Qh7 9.Qxc8 Kg6 10.Qe6")
+opera = predict_curve(OPERA, bundle=bundle)
+last = opera.iloc[-1]
+assert last["terminal_result"] == "white"
+assert (last["p_white"], last["p_draw"], last["p_black"]) == (1.0, 0.0, 0.0)
+assert last["expected_score_white"] == 1.0
+assert opera["terminal_result"].iloc[:-1].isna().all()     # only the final ply is finished
+loyd = predict_curve(LOYD, bundle=bundle)
+assert loyd["terminal_result"].iloc[-1] == "draw" and loyd["p_draw"].iloc[-1] == 1.0
+assert loyd["expected_score_white"].iloc[-1] == 0.5
+assert terminal_result(chess.Board("8/8/4k3/8/8/3K4/8/8 w - - 0 1")) == "draw"   # two kings
+assert terminal_result(chess.Board()) is None
+assert list(opera["before_training"].iloc[:6]) == [True] * 5 + [False]
+assert not opera["before_training"].iloc[5:].any()
+print("Test 8 passed: checkmate, stalemate and bare kings give the real result; "
+      "before_training is True for plies 0 to 4 only")
+
+# Test 9: with the saved models, non-terminal rows are unchanged from the
+# values printed before this change (Opera Game, no ratings, 3 decimals).
+real = predict_curve(OPERA, bundle=load_bundle("."))
+expected = {10: (0.525, 0.048, 0.427), 20: (0.575, 0.038, 0.388), 30: (0.610, 0.034, 0.356)}
+for ply, values in expected.items():
+    row = real.iloc[ply]
+    assert tuple(round(row[c], 3) for c in ("p_white", "p_draw", "p_black")) == values, ply
+print("Test 9 passed: the saved models give the same numbers as before at plies 10, 20 and 30")
